@@ -83,7 +83,26 @@
             appId: "1:692086806928:web:9be6fe2234817980f27b15",
             measurementId: "G-E13Q90PWMT"
         };
-        
+          // 1️. 初始化 Firebase
+             firebase.initializeApp(firebaseConfig);
+
+            // 2. 取得 Auth
+             const auth = firebase.auth();
+
+            // 3. 這一行就是你問的重點 ⭐
+             auth.signInAnonymously()
+               .then(() => {
+                 console.log("匿名登入成功");
+               })
+               .catch((error) => {
+                 console.error("匿名登入失敗", error);
+               });
+
+            //4.再來才是 Firestore
+             const db = firebase.firestore();
+           </script>
+
+
         // ==========================================
         // 設定檢查邏輯 (請勿修改)
         // ==========================================
