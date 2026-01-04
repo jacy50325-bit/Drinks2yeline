@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+    <title>手搖重症紀錄 🐾</title>
+    
+    <!-- PWA 相關設定 -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="theme-color" content="#E3F2FD">
+    <link rel="apple-touch-icon" href="https://cdn-icons-png.flaticon.com/512/3081/3081162.png">
+
+    <!-- 載入 Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- 載入 Phosphor Icons (圖示庫) -->
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
+
+    <!-- 載入 React 和 Babel -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <!-- 載入 Firebase -->
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
+
+    <style>
+        body { 
+            font-family: "Microsoft JhengHei", "PingFang TC", sans-serif; 
+            background-color: #E3F2FD; 
+            -webkit-tap-highlight-color: transparent;
+            overscroll-behavior: none;
+        }
+        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #B3E5FC; border-radius: 10px; }
+        
+        /* 動畫 */
+        @keyframes float { 0% { transform: translateY(0px); } 50% { transform: translateY(-10px); } 100% { transform: translateY(0px); } }
+        .animate-float { animation: float 3s ease-in-out infinite; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        // ==========================================
+        // ⚠️ 請在此處填入您的設定 (GITHUB 上傳前必填)
+        // ==========================================
+        
+        // 1. Gemini API Key (請去 Google AI Studio 申請)
+        const GEMINI_API_KEY = "AIzaSyDzm3tg5DluzhbiTERSy60QgXUUTsIMvso"; 
+
+        // 2. Firebase Config (請去 Firebase Console > Project Settings 複製)
+        const firebaseConfig = {
+            apiKey: "AIzaSyDfIdU_etPLi7-cWWmlwrpBTNG_XbWAxxs",
+            authDomain: "drinks-5faa6.firebaseapp.com",
+            projectId: "drinks-5faa6",
+            storageBucket: "drinks-5faa6.firebasestorage.app",
+            messagingSenderId: "692086806928",
+            appId: "1:692086806928:web:9be6fe2234817980f27b15",
+            measurementId: "G-E13Q90PWMT"
+        };
+        
+        // ==========================================
+        
+        // 初始化 Firebase
+        if (!firebase.apps.length) {
+            firebase.initializeApp(firebaseConfig);
+        }
+        const db = firebase.firestore();
+        const auth = firebase.auth();
+
+        // 啟用離線快取
+        db.enablePersistence().catch(err => {
+            if (err.code == 'failed-precondition') {
+                console.log('多個分頁同時開啟導致快取失敗');
+            } else if (err.code == 'unimplemented') {
+                console.log('瀏覽器不支援快取');
+            }
+        });
+
+        const { useState, useEffect, useRef } = React;
+
+        const ICE_LEVELS = ["固定", "少冰", "微冰", "去冰", "溫", "熱"];
+        const SUGAR_LEVELS = ["固定", "無糖", "一分糖", "微糖", "半糖", "少糖"];
+        const initialDrinkState = { store: '', item: '', price: '', sugar: '無糖', ice: '微冰' };
+
+        // Gemini API 呼叫函數
+        const askGemini = async (payload) => {
+            if (!GEMINI_API_KEY) {
+                throw new Error("請先設定 GEMINI_API_KEY");
+            }
+            let url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${GEMINI_API_KEY}`;
+            
+            let delay = 1000;
+            for (let i = 0; i < 3; i++) { // Retry 3 times
+                try {
+                    const response = await fetch(url, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(payload)
+                    });
+                    if (!response.ok) throw new Error("API Request Failed");
+                    return await response.json();
+                } catch (error) {
+                    if (i === 2) throw error;
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                    delay *= 2;
+                }
+            }
+        };
+
+        function App() {
+            const [user, setUser] = useState(null);
+            const [drinks, setDrinks] = useState([]);
+            const [currentDate, setCurrentDate] = useState(new Date());
+            const [selectedDate, setSelectedDate] = useState(null);
+            const [isModalOpen, setIsModalOpen] = useState(false);
+            const [formEntries, setFormEntries] = useState([initialDrinkState]);
+            
+            // AI 狀態
+            const [aiLoading, setAiLoading] = useState(false);
+            const [aiResponse, setAiResponse] = useState("");
+            const [isAiModalOpen, setIsAiModalOpen] = useState(false);
+            const [aiMode, setAiMode] = useState("general"); // general, mood
+            const [moodInput, setMoodInput] = useState("");
+            const fileInputRef = useRef(null);
+
+            // 驗證
+            useEffect(() => {
+                const unsubscribe = auth.onAuthStateChanged(async (u) => {
+                    if (u) {
+                        setUser(u);
+                    } else {
+                        await auth.signInAnonymously();
+                    }
+                });
+                return () => unsubscribe();
+            }, []);
+
+            // 資料監聽
+            useEffect(() => {
+                if (!user) return;
+                const unsubscribe = db.collection('users').doc(user.uid).collection('drinks')
+                    .onSnapshot((snapshot) => {
+                        const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                        setDrinks(data);
+                    }, (error) => console.error(error));
+                return () => unsubscribe();
+            }, [user]);
+
+            // 日期邏輯
+            const daysInMonth = (year, month) => new Date(year, month + 1, 0).getDate();
+            const firstDayOfMonth = (year, month) => new Date(year, month, 1).getDay();
+
+            const getDrinksForDate = (day) => {
+                const dateStr = `${currentDate.getFullYear()}-${(currentDate.getMonth() + 1).toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
+                return drinks.filter(d => d.date === dateStr);
+            };
+
+            const handleDateClick = (day) => {
+                const dateStr = `${currentDate.getFullYear()}-${(currentDate.getMonth() + 1).toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
+                setSelectedDate(dateStr);
+                const existing = drinks.filter(d => d.date === dateStr);
+                setFormEntries(existing.length > 0 ? existing.map(d => ({ ...d })) : [{ ...initialDrinkState }]);
+                setIsModalOpen(true);
+            };
+
+            // 表單邏輯
+            const addMoreEntry = () => setFormEntries(prev => [...prev, { ...initialDrinkState }]);
+            const updateEntry = (index, field, value) => {
+                const newEntries = [...formEntries];
+                newEntries[index] = { ...newEntries[index], [field]: value };
+                setFormEntries(newEntries);
+            };
+
+            const removeEntry = async (index) => {
+                const entry = formEntries[index];
+                if (entry.id && user) {
+                    try {
+                        await db.collection('users').doc(user.uid).collection('drinks').doc(entry.id).delete();
+                    } catch (err) { console.error(err); }
+                }
+                if (formEntries.length === 1) setFormEntries([{ ...initialDrinkState }]);
+                else setFormEntries(formEntries.filter((_, i) => i !== index));
+            };
+
+            const handleSubmit = async () => {
+                if (!user) return;
+                try {
+                    const valid = formEntries.filter(e => e.store && e.item && e.price);
+                    for (const entry of valid) {
+                        const data = {
+                            store: entry.store, item: entry.item, price: Number(entry.price),
+                            sugar: entry.sugar, ice: entry.ice, date: selectedDate, updatedAt: new Date().toISOString()
+                        };
+                        if (entry.id) {
+                            await db.collection('users').doc(user.uid).collection('drinks').doc(entry.id).set(data, { merge: true });
+                        } else {
+                            await db.collection('users').doc(user.uid).collection('drinks').add({ ...data, createdAt: new Date().toISOString() });
+                        }
+                    }
+                    setIsModalOpen(false);
+                } catch (e) { console.error(e); }
+            };
+
+            // AI 功能
+            const handleImageScan = async (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                setAiLoading(true); setAiMode("general"); setIsAiModalOpen(true); setAiResponse("正在掃描照片... 🐈‍⬛");
+                const reader = new FileReader();
+                reader.onloadend = async () => {
+                    try {
+                        const res = await askGemini({
+                            contents: [{ parts: [{ text: "辨識照片手搖資訊回傳 JSON：{store, item, price, sugar, ice}" }, { inlineData: { mimeType: "image/png", data: reader.result.split(',')[1] } }] }],
+                            generationConfig: { responseMimeType: "application/json" }
+                        });
+                        const parsed = JSON.parse(res.candidates[0].content.parts[0].text);
+                        if (parsed.store || parsed.item) {
+                            const updated = [...formEntries];
+                            updated[0] = { ...updated[0], ...parsed };
+                            setFormEntries(updated);
+                            setAiResponse("✨ 掃描成功！請確認欄位。🐾");
+                            setTimeout(() => setIsAiModalOpen(false), 1500);
+                        }
+                    } catch (err) { setAiResponse("辨識失敗，請重試。🐈‍⬛ " + err.message); }
+                    finally { setAiLoading(false); }
+                };
+                reader.readAsDataURL(file);
+            };
+
+            const handleAiAnalyze = async () => {
+                setAiLoading(true); setAiMode("general"); setIsAiModalOpen(true); setAiResponse("正在分析本月數據... 📊");
+                const curMonth = `${currentDate.getFullYear()}-${(currentDate.getMonth() + 1).toString().padStart(2, '0')}`;
+                try {
+                    const res = await askGemini({ contents: [{ parts: [{ text: `你是一個毒舌但關心健康的營養師。分析以下手搖紀錄並給予幽默建議（200字內）：${JSON.stringify(drinks.filter(d => d.date.startsWith(curMonth)))}` }] }] });
+                    setAiResponse(res.candidates[0].content.parts[0].text);
+                } catch (e) { setAiResponse("分析失敗。🐈‍⬛ " + e.message); }
+                finally { setAiLoading(false); }
+            };
+
+            const handleDailyQuote = async () => {
+                setAiLoading(true); setAiMode("general"); setIsAiModalOpen(true); setAiResponse("正在抽取今日靈感... ☕");
+                const topics = ["生活小確幸", "工作疲憊時的安慰", "喝飲料的哲學", "貓咪的懶散智慧"];
+                const topic = topics[Math.floor(Math.random() * topics.length)];
+                try {
+                    const res = await askGemini({ 
+                        contents: [{ parts: [{ text: `請給我一句關於「${topic}」的短句（20字內），風格要溫暖療癒或帶點幽默，最後加上一個可愛的顏文字。` }] }]
+                    });
+                    setAiResponse(res.candidates[0].content.parts[0].text);
+                } catch (e) { setAiResponse("今天也是適合喝飲料的好日子 (≧▽≦)"); } 
+                finally { setAiLoading(false); }
+            };
+
+            const handleCalorieScout = async (drink) => {
+                setAiLoading(true); setAiMode("general"); setIsAiModalOpen(true); setAiResponse("計算熱量中... 🔥");
+                try {
+                    const res = await askGemini({ contents: [{ parts: [{ text: `估算 ${drink.store} ${drink.item} (${drink.sugar}/${drink.ice}) 的熱量，並提供一個「荒謬好笑的運動方式」來消耗這些熱量（例如：激烈地點頭 5000 次）。` }] }] });
+                    setAiResponse(res.candidates[0].content.parts[0].text);
+                } catch (e) { setAiResponse("計算失敗。"); }
+                finally { setAiLoading(false); }
+            };
+
+            const openMoodMixer = () => {
+                setMoodInput("");
+                setAiMode("mood");
+                setIsAiModalOpen(true);
+                setAiResponse("");
+            };
+
+            const handleMoodSubmit = async () => {
+                if (!moodInput) return;
+                setAiLoading(true); setAiResponse("正在調製配方中... 🧪");
+                try {
+                    const res = await askGemini({ 
+                        contents: [{ parts: [{ text: `使用者現在的心情是：「${moodInput}」。請推薦一款「台灣手搖飲料」（可指定品牌或通用種類，含甜度冰塊）。格式：🍹 推薦：[飲品名稱] ([甜度/冰塊])\n💬 理由：[一段溫暖或幽默的理由，50字內]` }] }],
+                        systemInstruction: { parts: [{ text: "你是一位透過飲料來療癒人心的手搖杯調酒師。" }] }
+                    });
+                    setAiResponse(res.candidates[0].content.parts[0].text);
+                } catch (e) { setAiResponse("系統忙線中，喝杯水冷靜一下吧！(・∀・) " + e.message); }
+                finally { setAiLoading(false); }
+            };
+
+            const todayStr = new Date().toISOString().split('T')[0];
+            const curMonthStr = `${currentDate.getFullYear()}-${(currentDate.getMonth() + 1).toString().padStart(2, '0')}`;
+            const monthlyTotal = drinks.filter(d => d.date.startsWith(curMonthStr)).reduce((sum, d) => sum + d.price, 0);
+
+            return (
+                <div className="min-h-[100dvh] text-[#37474F] font-sans overflow-hidden select-none flex flex-col relative">
+                    {/* 背景裝飾 */}
+                    <div className="fixed top-20 left-10 text-4xl opacity-10 pointer-events-none animate-float">🫧</div>
+                    <div className="fixed bottom-20 right-10 text-4xl opacity-10 pointer-events-none animate-bounce">🐬</div>
+                    <div className="fixed bottom-10 left-10 text-3xl opacity-10 pointer-events-none">🐈‍⬛</div>
+
+                    <div className="h-[env(safe-area-inset-top,0px)] bg-transparent w-full"></div>
+
+                    <div className="flex-1 overflow-y-auto pt-10 pb-20 px-4 custom-scrollbar">
+                        <header className="max-w-4xl mx-auto mb-6 text-center relative">
+                            <div className="flex items-center justify-center gap-1.5 mb-1 text-[#0288D1] font-bold text-[10px]">
+                                <i className="ph-fill ph-cloud animate-pulse"></i> 雲端備份同步
+                            </div>
+                            <h1 className="text-3xl md:text-5xl font-black text-[#263238] mb-4 tracking-tighter leading-tight relative">🐾 手搖重症紀錄 🐈‍⬛</h1>
+                            <div className="space-y-3">
+                                <div className="flex flex-wrap justify-center items-center gap-2 text-xs font-bold bg-white/70 backdrop-blur-md px-5 py-3 rounded-full w-fit mx-auto border border-white shadow-md">
+                                    <span className="bg-[#E1F5FE] px-3 py-1 rounded-full text-[#0288D1]">💙 $ {monthlyTotal}</span>
+                                    <span className="bg-gray-100 px-3 py-1 rounded-full text-[#263238]">🐾 {drinks.filter(d => d.date.startsWith(curMonthStr)).length} 杯</span>
+                                </div>
+                                <div className="flex justify-center flex-wrap gap-2">
+                                    <button onClick={handleAiAnalyze} className="bg-[#263238] text-white px-4 py-2 rounded-full text-[11px] font-bold shadow-md active:scale-95 transition-transform flex items-center gap-1">
+                                        <i className="ph-bold ph-sparkle"></i> 週報
+                                    </button>
+                                    <button onClick={handleDailyQuote} className="bg-[#0288D1] text-white px-4 py-2 rounded-full text-[11px] font-bold shadow-md active:scale-95 transition-transform flex items-center gap-1">
+                                        <i className="ph-bold ph-quotes"></i> 語錄
+                                    </button>
+                                    <button onClick={openMoodMixer} className="bg-[#FF7043] text-white px-4 py-2 rounded-full text-[11px] font-bold shadow-md active:scale-95 transition-transform flex items-center gap-1">
+                                        <i className="ph-bold ph-magic-wand"></i> 心情特調
+                                    </button>
+                                </div>
+                            </div>
+                        </header>
+
+                        <main className="max-w-5xl mx-auto">
+                            <div className="flex items-center justify-between mb-4 px-1">
+                                <button onClick={() => setCurrentDate(new Date(currentDate.getFullYear(), currentDate.getMonth() - 1))} className="p-2.5 bg-white rounded-xl shadow-sm text-[#0288D1] active:scale-90 transition-transform"><i className="ph-bold ph-caret-left"></i></button>
+                                <div className="text-md font-black text-[#263238] bg-white px-6 py-2 rounded-full border-2 border-white shadow-sm">{currentDate.getFullYear()} / {currentDate.getMonth() + 1}</div>
+                                <button onClick={() => setCurrentDate(new Date(currentDate.getFullYear(), currentDate.getMonth() + 1))} className="p-2.5 bg-white rounded-xl shadow-sm text-[#0288D1] active:scale-90 transition-transform"><i className="ph-bold ph-caret-right"></i></button>
+                            </div>
+
+                            <div className="bg-white/90 backdrop-blur rounded-[2rem] shadow-xl overflow-hidden border-[6px] md:border-[12px] border-white transition-all">
+                                <div className="grid grid-cols-7 bg-[#263238] py-2 text-center font-black text-white text-[9px] uppercase">
+                                    {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(d => <div key={d} className="py-2">{d}</div>)}
+                                </div>
+                                <div className="grid grid-cols-7">
+                                    {Array.from({ length: firstDayOfMonth(currentDate.getFullYear(), currentDate.getMonth()) }).map((_, i) => <div key={`empty-${i}`} className="h-20 md:h-40 bg-gray-50/10 border-b border-r border-gray-100"></div>)}
+                                    {Array.from({ length: daysInMonth(currentDate.getFullYear(), currentDate.getMonth()) }).map((_, i) => {
+                                        const day = i + 1;
+                                        const dDrinks = getDrinksForDate(day);
+                                        const isToday = `${currentDate.getFullYear()}-${(currentDate.getMonth() + 1).toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}` === todayStr;
+                                        return (
+                                            <div key={day} onClick={() => handleDateClick(day)} className="h-20 md:h-40 border-b border-r border-gray-100 p-1 cursor-pointer hover:bg-[#B3E5FC]/40 overflow-hidden relative group">
+                                                <div className={`w-6 h-6 flex items-center justify-center rounded-lg text-[10px] font-black ${isToday ? 'bg-[#0288D1] text-white shadow-sm rotate-3' : 'text-[#263238]'}`}>{day}</div>
+                                                <div className="mt-1 flex gap-0.5 px-0.5">
+                                                    {dDrinks.length >= 1 && <span className="text-[10px]">💙</span>}
+                                                    {dDrinks.length >= 2 && <span className="text-[10px]">🖤</span>}
+                                                </div>
+                                                <div className="mt-0.5 space-y-0.5 overflow-hidden">
+                                                    {dDrinks.slice(0, 2).map((d, idx) => (
+                                                        <div key={idx} className="flex items-center justify-between text-[7px] md:text-[10px] bg-[#263238] text-white px-1 py-0.5 rounded-sm truncate font-bold shadow-sm">
+                                                            <span className="truncate flex-1">{d.item}</span>
+                                                            <button onClick={(e) => { e.stopPropagation(); handleCalorieScout(d); }} className="ml-0.5 text-orange-300 active:scale-125" title="熱量估算"><i className="ph-fill ph-lightning"></i></button>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        </main>
+                    </div>
+
+                    {isModalOpen && (
+                        <div className="fixed inset-0 bg-[#263238]/95 backdrop-blur-xl flex flex-col items-center justify-end z-50 overflow-hidden pt-[env(safe-area-inset-top,0px)]">
+                            <div className="bg-white w-full max-w-2xl h-[94vh] rounded-t-[3rem] shadow-2xl flex flex-col border-x-[8px] border-t-[8px] border-[#B3E5FC] animate-in slide-in-from-bottom-20 duration-300 overflow-hidden relative pb-[env(safe-area-inset-bottom,0px)]">
+                                <div className="p-5 border-b border-gray-100 flex-shrink-0 bg-white">
+                                    <div className="flex justify-between items-center mb-4">
+                                        <h3 className="text-xl font-black text-[#263238]">補給站 🐾</h3>
+                                        <button onClick={() => setIsModalOpen(false)} className="p-2.5 bg-gray-100 rounded-full text-gray-400 active:scale-90"><i className="ph-bold ph-x"></i></button>
+                                    </div>
+                                    <button onClick={() => fileInputRef.current.click()} className="w-full mb-3 py-3 border-2 border-dashed border-[#0288D1] text-[#0288D1] rounded-[1.2rem] font-black flex items-center justify-center gap-2 text-sm shadow-sm active:scale-95 bg-white"><i className="ph-bold ph-camera"></i> ✨ AI 影像自動填單</button>
+                                    <input type="file" accept="image/*" ref={fileInputRef} onChange={handleImageScan} className="hidden" />
+                                    <div className="text-center py-2 bg-[#E1F5FE] rounded-[1rem] text-[#0288D1] font-black text-sm border border-white/50 shadow-inner">🐾 {selectedDate} 💙</div>
+                                </div>
+
+                                <div className="flex-1 overflow-y-auto p-5 space-y-8 custom-scrollbar bg-gray-50/50">
+                                    {formEntries.map((entry, index) => (
+                                        <div key={index} className="relative p-5 pt-12 bg-white rounded-[1.8rem] border-2 border-dashed border-gray-200 shadow-sm">
+                                            <div className="absolute top-4 left-5 bg-[#263238] text-white px-4 py-1 rounded-full text-[10px] font-black shadow-sm z-10">{entry.id ? "已存紀錄 #" : "新增紀錄 #"}{index + 1}</div>
+                                            <button type="button" onClick={() => removeEntry(index)} className="absolute top-4 right-5 bg-red-100 text-red-500 p-2 rounded-full active:scale-75 shadow-sm hover:bg-red-200 transition-colors"><i className="ph-bold ph-trash"></i></button>
+                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+                                                <input required className="w-full px-5 py-3.5 rounded-2xl border-2 border-transparent focus:border-[#B3E5FC] bg-gray-50 font-bold outline-none shadow-inner text-base" placeholder="店家..." value={entry.store} onChange={(e) => updateEntry(index, 'store', e.target.value)} />
+                                                <input required className="w-full px-5 py-3.5 rounded-2xl border-2 border-transparent focus:border-[#B3E5FC] bg-gray-50 font-bold outline-none shadow-inner text-base" placeholder="飲品..." value={entry.item} onChange={(e) => updateEntry(index, 'item', e.target.value)} />
+                                            </div>
+                                            <input required type="number" className="w-full mt-3 px-5 py-3.5 rounded-2xl border-2 border-transparent focus:border-[#B3E5FC] bg-gray-50 font-bold shadow-inner text-base" placeholder="金額 $" value={entry.price} onChange={(e) => updateEntry(index, 'price', e.target.value)} />
+                                            <div className="mt-6 grid grid-cols-3 md:grid-cols-6 gap-1.5">{SUGAR_LEVELS.map(l => <button key={l} type="button" onClick={() => updateEntry(index, 'sugar', l)} className={`py-3 rounded-xl border-2 text-[9px] font-black transition-all ${entry.sugar === l ? 'bg-[#263238] text-white border-[#263238] shadow-md' : 'bg-white text-gray-400 border-gray-100'}`}>{l}</button>)}</div>
+                                            <div className="mt-3 grid grid-cols-3 md:grid-cols-6 gap-1.5">{ICE_LEVELS.map(l => <button key={l} type="button" onClick={() => updateEntry(index, 'ice', l)} className={`py-3 rounded-xl border-2 text-[9px] font-black transition-all ${entry.ice === l ? 'bg-[#0288D1] text-white border-[#0288D1] shadow-md' : 'bg-white text-gray-400 border-gray-100'}`}>{l}</button>)}</div>
+                                        </div>
+                                    ))}
+                                    <div className="h-10"></div>
+                                </div>
+
+                                <div className="p-5 bg-white border-t border-gray-100 flex-shrink-0 flex flex-row gap-3 pb-[calc(env(safe-area-inset-bottom,1rem)+1.5rem)] shadow-[0_-10px_20px_rgba(0,0,0,0.02)]">
+                                    <button onClick={handleSubmit} className="flex-[1.6] py-5 bg-[#263238] text-white rounded-[1.8rem] font-black text-xl shadow-lg border-b-[8px] border-gray-900 active:translate-y-1 active:border-b-[4px] transition-all hover:bg-black">全都保存 💙</button>
+                                    <button onClick={addMoreEntry} className="flex-1 py-5 border-2 border-dashed border-[#B3E5FC] text-[#0288D1] rounded-[1.8rem] font-black active:scale-95 text-xs flex items-center justify-center gap-1 bg-white hover:bg-[#E1F5FE] transition-colors shadow-sm">🐾 再添一杯</button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {isAiModalOpen && (
+                        <div className="fixed inset-0 bg-[#263238]/90 backdrop-blur-xl flex items-center justify-center p-6 z-[100] pt-[env(safe-area-inset-top,1rem)]">
+                            <div className="bg-white rounded-[2rem] shadow-2xl w-full max-w-lg border-[8px] border-[#0288D1] p-6 text-center animate-in zoom-in duration-300 relative">
+                                <div className="absolute -top-6 left-1/2 -translate-x-1/2 bg-[#0288D1] text-white px-6 py-2 rounded-full font-black text-sm shadow-lg">✨ AI 實驗室 🐈‍⬛</div>
+                                <button onClick={() => setIsAiModalOpen(false)} className="absolute top-4 right-4 text-gray-300 hover:text-gray-500"><i className="ph-bold ph-x text-xl"></i></button>
+
+                                {aiMode === "mood" && !aiLoading && !aiResponse && (
+                                    <div className="mt-8 mb-4">
+                                        <div className="text-[#37474F] font-black text-lg mb-4">今天心情如何？</div>
+                                        <div className="flex flex-wrap justify-center gap-2 mb-4">
+                                            {['有點累', '超級開心', '想離職', '失戀了', '只想耍廢'].map(m => (
+                                                <button key={m} onClick={() => setMoodInput(m)} className={`px-4 py-2 rounded-full text-xs font-bold transition-all ${moodInput === m ? 'bg-[#FF7043] text-white shadow-md' : 'bg-gray-100 text-gray-500'}`}>{m}</button>
+                                            ))}
+                                        </div>
+                                        <input 
+                                            type="text" 
+                                            value={moodInput}
+                                            onChange={(e) => setMoodInput(e.target.value)}
+                                            placeholder="或輸入你的心情..."
+                                            className="w-full px-5 py-3 rounded-xl border-2 border-gray-200 bg-gray-50 focus:border-[#FF7043] outline-none text-center font-bold text-[#37474F] mb-4"
+                                        />
+                                        <button 
+                                            onClick={handleMoodSubmit}
+                                            disabled={!moodInput}
+                                            className="w-full py-3 bg-[#FF7043] text-white rounded-xl font-black shadow-md active:scale-95 disabled:opacity-50 disabled:active:scale-100 transition-all flex items-center justify-center gap-2"
+                                        >
+                                            <i className="ph-bold ph-magic-wand"></i> 調製專屬配方
+                                        </button>
+                                    </div>
+                                )}
+
+                                {aiLoading && (
+                                    <div className="py-10">
+                                        <div className="animate-spin text-[#0288D1] text-4xl mb-4 mx-auto w-fit"><i className="ph-bold ph-spinner"></i></div>
+                                        <p className="text-gray-400 text-xs font-bold animate-pulse">{aiResponse || "AI 正在思考中..."}</p>
+                                    </div>
+                                )}
+
+                                {!aiLoading && aiResponse && (
+                                    <>
+                                        <div className="p-4 rounded-full mx-auto w-fit mt-4 bg-[#E1F5FE] text-[#0288D1] text-3xl"><i className="ph-bold ph-sparkle"></i></div>
+                                        <div className="bg-gray-50 p-6 mt-6 rounded-[1.5rem] border-2 border-gray-100 text-[#37474F] text-sm max-h-[40vh] overflow-y-auto custom-scrollbar font-bold leading-relaxed text-left whitespace-pre-wrap">
+                                            {aiResponse}
+                                        </div>
+                                        {aiMode === "mood" ? (
+                                            <button onClick={() => { setAiResponse(""); setMoodInput(""); }} className="mt-6 px-8 py-3 bg-gray-100 text-gray-500 rounded-full font-black text-xs active:scale-95 transition-all">再玩一次</button>
+                                        ) : (
+                                            <button onClick={() => { setIsAiModalOpen(false); }} className="mt-8 px-12 py-4 bg-[#263238] text-white rounded-full font-black shadow-md active:scale-95 transition-all hover:bg-black">知道了 🐾</button>
+                                        )}
+                                    </>
+                                )}
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
