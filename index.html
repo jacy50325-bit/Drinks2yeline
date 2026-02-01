@@ -85,7 +85,7 @@
         };
         
         // ==========================================
-        // 設定檢查邏輯 (請勿修改)
+        // 設定檢查邏輯
         // ==========================================
         function checkConfig() {
             const isConfigDefault = firebaseConfig.apiKey.includes("您的");
@@ -121,7 +121,7 @@
         const SUGAR_LEVELS = ["固定", "無糖", "一分糖", "微糖", "半糖", "少糖"];
         const initialDrinkState = { store: '', item: '', price: '', sugar: '無糖', ice: '微冰' };
 
-        // Gemini API 呼叫函數 (包含安全設定)
+        // Gemini API 呼叫函數
         const askGemini = async (payload) => {
             let url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${GEMINI_API_KEY}`;
             
@@ -181,46 +181,59 @@
             const [moodInput, setMoodInput] = useState("");
             const fileInputRef = useRef(null);
 
-            // 驗證與登入 (修改後：支援 Google 登入與匿名登入並存)
+            // ⚠️ 關鍵修正：增加 getRedirectResult 來捕獲登入錯誤
             useEffect(() => {
+                // 1. 檢查是否有重定向回來的登入結果 (如果網域沒授權，錯誤會在這裡出現)
+                auth.getRedirectResult().then((result) => {
+                    if (result.user) {
+                        console.log("Redirect success:", result.user);
+                        setUser(result.user);
+                    }
+                }).catch((error) => {
+                    console.error("Redirect Login Error:", error);
+                    alert("Google 登入失敗！\n\n錯誤代碼：" + error.code + "\n錯誤訊息：" + error.message + "\n\n常見原因：\n請到 Firebase Console > Authentication > Settings > Authorized domains，將您的網域 (例如 xxx.github.io) 加入白名單。");
+                    setIsLoginLoading(false);
+                });
+
+                // 2. 監聽身份狀態改變
                 const unsubscribe = auth.onAuthStateChanged(async (u) => {
                     if (u) {
+                        console.log("User updated:", u.email, "Anonymous:", u.isAnonymous);
                         setUser(u);
-                        setIsLoginLoading(false);
+                        // 如果是 Google 登入，才關閉 Loading，避免匿名登入覆蓋 Loading 狀態
+                        if (!u.isAnonymous) {
+                            setIsLoginLoading(false);
+                        }
                     } else {
-                        // 若未登入，自動使用匿名登入 (訪客模式)
+                        // 如果沒有使用者，自動執行匿名登入
+                        console.log("No user, signing in anonymously...");
                         try {
                             await auth.signInAnonymously();
                         } catch (error) {
-                            console.error("Anonymous login failed", error);
-                            setIsLoginLoading(false);
+                            console.error("Anonymous login error", error);
                         }
                     }
                 });
                 return () => unsubscribe();
             }, []);
 
-            // Google 登入處理
             const handleGoogleLogin = async () => {
                 setIsLoginLoading(true);
                 const provider = new firebase.auth.GoogleAuthProvider();
                 try {
-                    // 使用 Redirect 以適應手機版 PWA 環境
                     await auth.signInWithRedirect(provider);
                 } catch (error) {
-                    console.error("Login error", error);
-                    alert("登入失敗: " + error.message);
+                    console.error("Login trigger error", error);
+                    alert("登入啟動失敗: " + error.message);
                     setIsLoginLoading(false);
                 }
             };
 
-            // 登出處理
             const handleLogout = async () => {
                 if(confirm("確定要登出 Google 帳號嗎？\n登出後將切換回訪客模式。")) {
                     setIsLoginLoading(true);
                     try {
                         await auth.signOut();
-                        // 登出後 onAuthStateChanged 會觸發，並自動執行 signInAnonymously
                     } catch (error) {
                         console.error("Logout error", error);
                         setIsLoginLoading(false);
@@ -288,18 +301,14 @@
                     alert("尚未登入，請稍後再試或重新整理頁面。");
                     return;
                 }
-                
                 setIsSaving(true); 
-
                 try {
                     const valid = formEntries.filter(e => e.store && e.item && e.price);
-                    
                     if (valid.length === 0 && formEntries[0].store === '') {
                          setIsModalOpen(false);
                          setIsSaving(false);
                          return;
                     }
-
                     for (const entry of valid) {
                         const data = {
                             store: entry.store, item: entry.item, price: Number(entry.price),
@@ -311,9 +320,7 @@
                             await db.collection('users').doc(user.uid).collection('drinks').add({ ...data, createdAt: new Date().toISOString() });
                         }
                     }
-                    
                     setIsModalOpen(false);
-                    
                 } catch (e) { 
                     console.error("Save failed:", e);
                     if (e.code === 'permission-denied') {
@@ -432,6 +439,7 @@
             // 判斷按鈕顯示內容
             const renderAuthButton = () => {
                 if (isLoginLoading) return <span className="animate-pulse">🔄 處理中...</span>;
+                // 注意：這裡使用 user.isAnonymous 來判斷是否顯示名稱
                 if (user && !user.isAnonymous) {
                     return <span onClick={handleLogout} className="cursor-pointer hover:underline flex items-center gap-1"><i className="ph-fill ph-user-circle"></i> {user.displayName || "使用者"} (登出)</span>;
                 }
