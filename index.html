@@ -181,51 +181,52 @@
             const [moodInput, setMoodInput] = useState("");
             const fileInputRef = useRef(null);
 
-            // ⚠️ 關鍵修正：增加 getRedirectResult 來捕獲登入錯誤
+            // ⚠️ 關鍵修正：身份驗證監聽
             useEffect(() => {
-                // 1. 檢查是否有重定向回來的登入結果 (如果網域沒授權，錯誤會在這裡出現)
-                auth.getRedirectResult().then((result) => {
-                    if (result.user) {
-                        console.log("Redirect success:", result.user);
-                        setUser(result.user);
-                    }
-                }).catch((error) => {
-                    console.error("Redirect Login Error:", error);
-                    alert("Google 登入失敗！\n\n錯誤代碼：" + error.code + "\n錯誤訊息：" + error.message + "\n\n常見原因：\n請到 Firebase Console > Authentication > Settings > Authorized domains，將您的網域 (例如 xxx.github.io) 加入白名單。");
-                    setIsLoginLoading(false);
-                });
-
-                // 2. 監聽身份狀態改變
                 const unsubscribe = auth.onAuthStateChanged(async (u) => {
                     if (u) {
-                        console.log("User updated:", u.email, "Anonymous:", u.isAnonymous);
+                        console.log("User detected:", u.email, "Anonymous:", u.isAnonymous);
                         setUser(u);
-                        // 如果是 Google 登入，才關閉 Loading，避免匿名登入覆蓋 Loading 狀態
-                        if (!u.isAnonymous) {
-                            setIsLoginLoading(false);
-                        }
+                        // 登入成功後關閉 Loading
+                        setIsLoginLoading(false);
                     } else {
-                        // 如果沒有使用者，自動執行匿名登入
+                        // 如果未登入，才執行匿名登入
                         console.log("No user, signing in anonymously...");
                         try {
                             await auth.signInAnonymously();
                         } catch (error) {
                             console.error("Anonymous login error", error);
+                            // 如果連匿名登入都失敗，可能是網路或 Firebase 設定問題
                         }
                     }
                 });
                 return () => unsubscribe();
             }, []);
 
+            // ⚠️ 關鍵修正：改用 signInWithPopup (彈出視窗)
+            // 這樣可以避免頁面重整導致狀態遺失，且如果有錯誤會直接被 catch 捕獲
             const handleGoogleLogin = async () => {
                 setIsLoginLoading(true);
                 const provider = new firebase.auth.GoogleAuthProvider();
+                
                 try {
-                    await auth.signInWithRedirect(provider);
+                    // 嘗試登入 (PC/Android Chrome 支援度佳)
+                    const result = await auth.signInWithPopup(provider);
+                    console.log("Popup Login Success:", result.user);
+                    // 登入成功後 onAuthStateChanged 會自動更新 user
                 } catch (error) {
-                    console.error("Login trigger error", error);
-                    alert("登入啟動失敗: " + error.message);
+                    console.error("Login Error:", error);
                     setIsLoginLoading(false);
+                    
+                    if (error.code === 'auth/popup-blocked') {
+                        alert("登入視窗被瀏覽器擋住了！\n請允許此網站開啟彈出式視窗 (Pop-ups)。");
+                    } else if (error.code === 'auth/popup-closed-by-user') {
+                        alert("登入已取消。");
+                    } else if (error.code === 'auth/unauthorized-domain') {
+                        alert("網域未授權！(Unauthorized Domain)\n\n請到 Firebase Console > Authentication > Settings > Authorized domains\n將您的網址 (例如 your-name.github.io) 加入白名單。");
+                    } else {
+                        alert("登入失敗: " + error.message);
+                    }
                 }
             };
 
