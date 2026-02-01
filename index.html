@@ -67,14 +67,14 @@
     <script type="text/babel">
         // ==========================================
         // ⚠️【請務必在此填入您的設定】⚠️
-        // 如果您直接複製貼上，這裡會是空的，請把舊檔案裡的設定複製過來！
         // ==========================================
         
         // 1. Gemini API Key
-        const GEMINI_API_KEY = "AIzaSyBPluAL1IIXechCTxGOPZGnSGq5bLNnSyU"; // 請填入
+        const GEMINI_API_KEY = "AIzaSyBPluAL1IIXechCTxGOPZGnSGq5bLNnSyU"; // 請在此填入您的 Key
 
-        // 2. Firebase Config (請從 Firebase Console 複製)
+        // 2. Firebase Config
         const firebaseConfig = {
+            // 請填入您的 Firebase 設定
             apiKey: "AIzaSyC6-AtRL_0C3XJXuHrGuBNP2Kx886EESs0",
             authDomain: "drinks-adc3b.firebaseapp.com",
             projectId: "drinks-adc3b",
@@ -121,9 +121,23 @@
         const SUGAR_LEVELS = ["固定", "無糖", "一分糖", "微糖", "半糖", "少糖"];
         const initialDrinkState = { store: '', item: '', price: '', sugar: '無糖', ice: '微冰' };
 
-        // Gemini API 呼叫函數
+        // Gemini API 呼叫函數 (已加入 Safety Settings 修正)
         const askGemini = async (payload) => {
             let url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${GEMINI_API_KEY}`;
+            
+            // 修正：加入安全設定，避免毒舌建議被 AI 判定為騷擾而阻擋
+            const safetySettings = [
+                { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
+                { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
+                { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
+                { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" }
+            ];
+
+            // 將 safetySettings 合併到 payload
+            const finalPayload = {
+                ...payload,
+                safetySettings: safetySettings
+            };
             
             let delay = 1000;
             for (let i = 0; i < 3; i++) {
@@ -131,9 +145,15 @@
                     const response = await fetch(url, {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify(payload)
+                        body: JSON.stringify(finalPayload)
                     });
-                    if (!response.ok) throw new Error("API Request Failed");
+                    
+                    if (!response.ok) {
+                        const errText = await response.text();
+                        console.error("API Error Detail:", errText); // 印出詳細錯誤以便除錯
+                        throw new Error(`API Request Failed: ${response.status}`);
+                    }
+                    
                     return await response.json();
                 } catch (error) {
                     if (i === 2) throw error;
@@ -173,7 +193,6 @@
                             await auth.signInAnonymously();
                         } catch (error) {
                             console.error("Login failed", error);
-                            // 針對 auth/network-request-failed 提供更具體的錯誤提示
                             if (error.code === 'auth/network-request-failed') {
                                 alert("連線失敗 (Network Error)\n\n可能原因：\n1. Firebase Config 中的 authDomain 設定錯誤。\n2. 您的網路環境阻擋了 Firebase 連線。\n3. GitHub Pages 網域未加入 Firebase 白名單。");
                             } else {
@@ -194,9 +213,6 @@
                         setDrinks(data);
                     }, (error) => {
                         console.error("Firestore Error:", error);
-                        if (error.code === 'permission-denied') {
-                           // alert("讀取資料失敗：權限不足。");
-                        }
                     });
                 return () => unsubscribe();
             }, [user]);
@@ -314,11 +330,35 @@
 
             const handleAiAnalyze = async () => {
                 setAiLoading(true); setAiMode("general"); setIsAiModalOpen(true); setAiResponse("正在分析本月數據... 📊");
+                
                 const curMonth = `${currentDate.getFullYear()}-${(currentDate.getMonth() + 1).toString().padStart(2, '0')}`;
+                // 1. 資料預處理：取出本月資料
+                const monthDrinks = drinks.filter(d => d.date.startsWith(curMonth));
+
+                // 2. 防呆檢查：如果沒有資料，不呼叫 API
+                if (monthDrinks.length === 0) {
+                    setAiResponse(`本月 (${curMonth}) 還沒有任何飲料紀錄喔！\n\n你是神嗎？😇\n(或者只是還沒記帳？趕快去記一筆吧！)`);
+                    setAiLoading(false);
+                    return;
+                }
+
                 try {
-                    const res = await askGemini({ contents: [{ parts: [{ text: `你是一個毒舌但關心健康的營養師。分析以下手搖紀錄並給予幽默建議（200字內）：${JSON.stringify(drinks.filter(d => d.date.startsWith(curMonth)))}` }] }] });
-                    setAiResponse(res.candidates[0].content.parts[0].text);
-                } catch (e) { setAiResponse("分析失敗：" + e.message); }
+                    const res = await askGemini({ 
+                        contents: [{ parts: [{ text: `你是一個毒舌但關心健康的營養師。分析以下手搖紀錄並給予幽默建議（200字內），如果資料顯示喝很多糖，請毫不留情地吐槽：${JSON.stringify(monthDrinks)}` }] }] 
+                    });
+                    
+                    if (res.candidates && res.candidates[0] && res.candidates[0].content) {
+                        setAiResponse(res.candidates[0].content.parts[0].text);
+                    } else if (res.promptFeedback && res.promptFeedback.blockReason) {
+                         // 3. 處理被阻擋的情況 (雖然加了 Safety Settings，但仍需防備)
+                         setAiResponse("AI 覺得你的飲料紀錄太驚人，驚訝到說不出話了... (內容可能涉及敏感詞被阻擋 😅)");
+                    } else {
+                        setAiResponse("AI 暫時無法回應，請稍後再試。");
+                    }
+                } catch (e) { 
+                    console.error(e);
+                    setAiResponse("分析失敗：" + e.message); 
+                }
                 finally { setAiLoading(false); }
             };
 
